@@ -209,10 +209,6 @@ class SaveLoader(QtCore.QObject):
             self.unknown_command(player)
             return
 
-        # Reset timers
-        self.valid_timer.stop()
-        self.count_down_timer.stop()
-
         if text_list[2] == 'last':
             self.restore_to = -1
         else:
@@ -232,12 +228,13 @@ class SaveLoader(QtCore.QObject):
                 self.server_tell(player, 'Only op can make a backup. Permission denied.')
                 return
         
-        self.need_confirm = True
-        valid_time = self.configs['restore-valid-sec']
-        self.server_say('Player {} requested for restoring the server to: {}'.format(player.name, self.backups[self.restore_to]['time']))
-        self.server_tell(player, 'Please type "!sl confirm" to CONFIRM your operation or type "!sl cancel" to cancel.')
-        self.server_tell(player, 'If not confirmed, the restoration will be cancelled automatically after {} seconds.'.format(valid_time))
-        self.valid_timer.start(valid_time * 1000)
+        if self.count_down == -1:
+            self.need_confirm = True
+            valid_time = self.configs['restore-valid-sec']
+            self.server_say('Player {} requested for restoring the server to: {}'.format(player.name, self.backups[self.restore_to]['time']))
+            self.server_tell(player, 'Please type "!sl confirm" to CONFIRM your operation or type "!sl cancel" to cancel.')
+            self.server_tell(player, 'If not confirmed, the restoration will be cancelled automatically after {} seconds.'.format(valid_time))
+            self.valid_timer.start(valid_time * 1000)
 
     def show_list(self, player, text_list):
         self.logger.debug('SaveLoader.show_list called')
@@ -280,6 +277,7 @@ class SaveLoader(QtCore.QObject):
         # Will not check if the command contains only 2 arguments
         # Because cancelation is a high-priority operation
         self.count_down_timer.stop()
+        self.valid_timer.stop()
         self.count_down = -1
         self.restore_to = None
         if self.need_confirm:
