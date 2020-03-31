@@ -209,6 +209,10 @@ class SaveLoader(QtCore.QObject):
             self.unknown_command(player)
             return
 
+        # Reset timers
+        self.valid_timer.stop()
+        self.count_down_timer.stop()
+
         if text_list[2] == 'last':
             self.restore_to = -1
         else:
@@ -264,9 +268,10 @@ class SaveLoader(QtCore.QObject):
 
         if self.need_confirm:
             self.valid_timer.stop()
-            self.count_down = self.configs['restore-count-down-sec'] + 1
-            self.count_down_timer.start(1000)
-            self.server_tell(player, 'You have confirmed the restoration. Count down will start immediately.')
+            if self.count_down == -1:
+                self.count_down = self.configs['restore-count-down-sec'] + 1
+                self.count_down_timer.start(1000)
+                self.server_tell(player, 'You have confirmed the restoration. Count down will start immediately.')
         else:
             self.server_tell(player, 'Nothing to confirm.')
 
@@ -336,6 +341,7 @@ class SaveLoader(QtCore.QObject):
         self.count_down -= 1
         if self.count_down == 0:
             self.count_down_timer.stop()
+            self.count_down = -1
             self.core.stop_server()
             self.restoring = True
             return
