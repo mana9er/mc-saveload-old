@@ -61,6 +61,7 @@ class SaveLoader(QtCore.QObject):
         self.count_down_timer = QTimer(self)
         self.count_down_timer.timeout.connect(self.restore_count_down)
         self.count_down = -1
+
         if self.configs['auto-backup-interval-hour'] != 0:  # auto-backup enabled
             self.auto_backup_timer = QTimer(self)
             self.auto_backup_timer.timeout.connect(self.auto_backup)
@@ -135,7 +136,8 @@ class SaveLoader(QtCore.QObject):
 
     def on_core_quit(self):
         self.logger.debug('SaveLoader.on_core_quit called')
-        self.auto_backup_counted = time.time() - self.auto_backup_count_start_time
+        if self.configs['auto-backup-interval-hour'] != 0:
+            self.auto_backup_counted = time.time() - self.auto_backup_count_start_time
         self.update_info()
 
     def help(self, player, text_list):
