@@ -168,11 +168,11 @@ class SaveLoader(QtCore.QObject):
         self.server_tell(player, 'Backup starts.')
         
         remark = '' if len(text_list) < 3 else text_list[2]
-        time_str = time.strftime('%Y-%m-%d %H.%M.%S', time.localtime())
+        time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
         if self.configs['save-path'] == '':
-            file_name = os.path.join(self.core.init_cwd, 'saveload', 'backup_' + time_str)
+            file_name = os.path.join(self.core.init_cwd, 'saveload', 'backup_' + time_str.replace(':', '.'))
         else:
-            file_name = os.path.join(self.configs['save-path'], 'backup_' + time_str)
+            file_name = os.path.join(self.configs['save-path'], 'backup_' + time_str.replace(':', '.'))
 
         self.core.write_server('/save-off')
         self.core.write_server('/save-all flush')
@@ -294,11 +294,11 @@ class SaveLoader(QtCore.QObject):
             return
 
         remark = 'Auto-backup'
-        time_str = time.strftime('%Y-%m-%d %H.%M.%S', time.localtime())
+        time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
         if self.configs['save-path'] == '':
-            file_name = os.path.join(self.core.init_cwd, 'saveload', 'backup_' + time_str)
+            file_name = os.path.join(self.core.init_cwd, 'saveload', 'backup_' + time_str.replace(':', '.'))
         else:
-            file_name = os.path.join(self.configs['save-path'], 'backup_' + time_str)
+            file_name = os.path.join(self.configs['save-path'], 'backup_' + time_str.replace(':', '.'))
 
         self.core.write_server('/save-off')
         self.core.write_server('/save-all flush')
