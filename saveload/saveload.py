@@ -165,6 +165,8 @@ class SaveLoader(QtCore.QObject):
                 self.server_tell(player, 'Only op can make a backup. Permission denied.')
                 return
         
+        self.server_tell(player, 'Backup starts.')
+        
         remark = '' if len(text_list) < 3 else text_list[2]
         time_str = time.strftime('%Y-%m-%d %H.%M.%S', time.localtime())
         if self.configs['save-path'] == '':
