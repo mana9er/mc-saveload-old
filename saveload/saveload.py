@@ -202,7 +202,8 @@ class SaveLoader(QtCore.QObject):
         self.server_say(info_str)
 
         if len(self.backups) > self.configs['max-backup-num']:  # max-backup-num exceeded, delete the oldest backup
-            os.remove(self.backups[0]['file_name'])
+            if os.path.exists(self.backups[0]['file_name']):
+                os.remove(self.backups[0]['file_name'])
             del self.backups[0]
     
         self.update_info()
