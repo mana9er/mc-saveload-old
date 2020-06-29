@@ -15,6 +15,6 @@ class BackupThread(QThread):
 
     def run(self):
         start_time = time()
-        file_name, file_size = zipper.zip_dir('./', file_name, self.format)
+        file_name, file_size = zipper.zip_dir('./', self.filename, self.format)
         end_time = time()
         self.backup_finished.emit((file_name, file_size, end_time - start_time))
