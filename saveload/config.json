@@ -2,6 +2,7 @@
     "permission-level": "op",
     "max-backup-num": 5,
     "save-path": "",
+    "zip-format": "zip",
     "restore-valid-sec": 15,
     "restore-count-down-sec": 15,
     "auto-backup-interval-hour": 0

@@ -1,8 +1,10 @@
 import json
 import os
 import time
-from . import zip
+import re
+from . import zipper
 from . import parser
+from . import backupThread
 from PyQt5 import QtCore
 from PyQt5.QtCore import QTimer
 
@@ -17,12 +19,31 @@ class SaveLoader(QtCore.QObject):
         self.core = core
         self.logger = logger
         self.info_file = info_file
+        self.disabled = False
+
+        # load mcBasicLib
+        self.utils = core.get_plugin('mcBasicLib')
+        if self.utils is None:
+            self.logger.error('Failed to load plugin "mcBasicLib", cmdRepost will be disabled.')
+            self.logger.error('Please make sure that "mcBasicLib" has been added to plugins.')
+            self.disabled = True
 
         # load config
-        self.configs = {}
         self.logger.info('Loading configs...')
-        with open(config_file, 'r', encoding='utf-8') as cf:
-            self.configs = json.load(cf)
+        try:
+            with open(config_file, 'r', encoding='utf-8') as cf:
+                self.configs = json.load(cf)
+        except OSError, IOError:
+            self.logger.error('Failed to open config.json, saveload will be disabled.')
+            self.logger.error('Please make sure that config.json exists in saveload directory.')
+            self.disabled = True
+        except json.JSONDecodeError:
+            self.logger.error('Invalid format of config.json, saveload will be disabled.')
+            self.logger.error('Please make sure that config.json is encoded with utf-8 and is of standard JSON format.')
+            self.disabled = True
+
+        if self.disabled:
+            return
 
         # load backup info
         if os.path.exists(self.info_file):
@@ -39,7 +60,8 @@ class SaveLoader(QtCore.QObject):
             self.update_info()
         
         # connect signals and slots
-        self.core.notifier.sig_input.connect(self.on_player_input)
+        self.utils.sig_input.connect(self.on_player_input)
+        self.core.sig_server_output.connect(self.check_save_state)
         self.core.core_quit.connect(self.on_core_quit)
         self.core.sig_server_stop.connect(self.maybe_restore_server)
 
@@ -51,6 +73,9 @@ class SaveLoader(QtCore.QObject):
             'confirm': self.confirm,
             'cancel': self.cancel,
         }
+
+        self.requested_backup = False
+        self.backup_info = None  # (file_name, player, remark, time_str)
 
         self.restore_to = None
         self.need_confirm = False
@@ -71,14 +96,16 @@ class SaveLoader(QtCore.QObject):
             self.auto_backup_count_start_time = time.time()
 
     def update_info(self):
-        json.dump(
-            {
-                'backups': self.backups,
-                'auto-backup-counted': self.auto_backup_counted,
-            }, 
-            open(self.info_file, 'w', encoding='utf-8'),
-            indent=2
-        )
+        self.logger.debug('SaveLoader.update_info called')
+        with open(self.info_file, 'w', encoding='utf-8') as sf:
+            json.dump(
+                {
+                    'backups': self.backups,
+                    'auto-backup-counted': self.auto_backup_counted,
+                }, 
+                sf,
+                indent=2
+            )
 
     def size_wrap(self, file_size):
         byte_size = file_size
@@ -91,19 +118,11 @@ class SaveLoader(QtCore.QObject):
             return '{:.2f} MB'.format(mb)
         return '{:.2f} GB'.format(gb)
 
-    def server_say(self, text):
-        self.core.write_server('/say {}'.format(text))
-
-    def server_tell(self, player, text):
-        self.core.write_server('/tellraw {} {}'.format(player.name, json.dumps({'text': text, 'color': 'yellow'})))
-    
-    def server_warn(self, player, text):
-        self.core.write_server('/tellraw {} {}'.format(player.name, json.dumps({'text': text, 'color': 'red'})))
-
     def unknown_command(self, player):
-        self.logger.warning('unknown command')
-        self.server_tell(player, 'Unknown command. Type "!sl help" for help.')
+        self.logger.warning('Unknown command typed by {}'.format(player.name))
+        self.utils.tell(player, 'Unknown command. Type "!sl help" for help.')
     
+    @QtCore.pyqtSlot(tuple)
     def on_player_input(self, pair):
         '''
         Acceptable commands:
@@ -119,30 +138,78 @@ class SaveLoader(QtCore.QObject):
         text = pair[1]
         text_list = parser.split_text(text)
 
+        if len(text) == 0:
+            return
+
         if text_list[0] == self.cmd_prefix:
             if len(text_list) > 1 and text_list[1] in self.cmd_list.keys():
-                try:
-                    self.cmd_list[text_list[1]](player, text_list)
-                except AttributeError as err:
-                    self.logger.error('Fatal: AttributeError raised.')
-                    print(err)
-                    self.server_warn(player, 'saveload internal error raised.')
-                except KeyError as err:
-                    self.logger.error('Fatal: KeyError raised.')
-                    print(err)
-                    self.server_warn(player, 'saveload internal error raised.')
+                self.cmd_list[text_list[1]](player, text_list)
             else:
                 self.unknown_command(player)
 
+    @QtCore.pyqtSlot()
     def on_core_quit(self):
         self.logger.debug('SaveLoader.on_core_quit called')
         if self.configs['auto-backup-interval-hour'] != 0:
             self.auto_backup_counted = time.time() - self.auto_backup_count_start_time
         self.update_info()
 
+    @QtCore.pyqtSlot(list)
+    def check_save_state(self, lines):
+        for line in lines:
+            match_obj1 = re.match(r'[^<>]*?\[Server thread/INFO\] \[minecraft/DedicatedServer\]: (.*)$', line)
+            text = match_obj1.group(1) if match_obj1 else ''
+            match_obj2 = re.match(r'^Saved the game', text)
+            if match_obj2:
+                # The game has been succesfully saved
+                if not self.requested_backup:
+                    return
+                self.logger.debug('Detected: save-all flush completed')
+                self.requested_backup = False
+                self.backup_info = None
+                backup_thread = backupThread.BackupThread(self.backup_info[0], self.configs['zip-format'])
+                backup_thread.backup_finished.connect(self.backup_finish)
+                backup_thread.start()
+
+    @QtCore.pyqtSlot(tuple)
+    def backup_finish(self, info):
+        self.logger.debug('SaveLoader.backup_finish called')
+        file_name, file_size, time_spent = info
+        _, player, remark, time_str = self.backup_info
+
+        self.core.write_server('/save-on')
+
+        zip_size = self.size_wrap(file_size)
+        self.backups.append(
+            {
+                'file_name': file_name,
+                'time': time_str,
+                'player': player.name,
+                'remark': remark,
+                'size': zip_size,
+            }
+        )
+
+        info_str = 'Player {} successfully made a backup at {}'.format(player.name, time_str)
+        if remark != '':
+            info_str += ' with a remark: {}'.format(remark)
+        self.utils.say(info_str)
+        info_str = 'Backup size: {}. Cost: {:.1f} seconds.'.format(zip_size, end_time - start_time)
+        self.utils.say(info_str)
+
+        if len(self.backups) > self.configs['max-backup-num']:  # max-backup-num exceeded, delete the oldest backup
+            self.logger.info('Max backup number exceeded. Deleting older backups')
+            del_file_name = self.backups[0]['file_name']
+            if os.path.exists(del_file_name):
+                os.remove(del_file_name)
+            self.logger.info('File {} has been deleted'.format(del_file_name))
+            del self.backups[0]
+    
+        self.update_info()
+
     def help(self, player, text_list):
         self.logger.debug('SaveLoader.help called')
-        self.server_tell(
+        self.utils.tell(
             player, 
             ('Welcome to saveload!\n'
             'You are able to use the following commands:\n'
@@ -162,10 +229,10 @@ class SaveLoader(QtCore.QObject):
 
         if self.configs['permission-level'] == 'op':
             if not player.is_op():
-                self.server_tell(player, 'Only op can make a backup. Permission denied.')
+                self.utils.tell(player, 'Only op can make a backup. Permission denied.')
                 return
         
-        self.server_tell(player, 'Backup starts.')
+        self.utils.tell(player, 'Backup starts.')
         
         remark = '' if len(text_list) < 3 else text_list[2]
         time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
@@ -176,37 +243,8 @@ class SaveLoader(QtCore.QObject):
 
         self.core.write_server('/save-off')
         self.core.write_server('/save-all flush')
-        
-        start_time = time.time()
-        file_name, file_size = zip.zip_dir('./', file_name)
-        end_time = time.time()
-
-        self.core.write_server('/save-on')
-
-        zip_size = self.size_wrap(file_size)
-        self.backups.append(
-            {
-                'file_name': file_name,
-                'time': time_str,
-                'player': player.name,
-                'remark': remark,
-                'size': zip_size,
-            }
-        )
-
-        info_str = 'Player {} successfully made a backup at {}'.format(player.name, time_str)
-        if remark != '':
-            info_str += ' with a remark: {}'.format(remark)
-        self.server_say(info_str)
-        info_str = 'Backup size: {}. Cost: {:.1f} seconds.'.format(zip_size, end_time - start_time)
-        self.server_say(info_str)
-
-        if len(self.backups) > self.configs['max-backup-num']:  # max-backup-num exceeded, delete the oldest backup
-            if os.path.exists(self.backups[0]['file_name']):
-                os.remove(self.backups[0]['file_name'])
-            del self.backups[0]
-    
-        self.update_info()
+        self.requested_backup = True
+        self.backup_info = (file_name, player, remark, time_str)
 
     def restore(self, player, text_list):
         self.logger.debug('SaveLoader.restore called')
@@ -224,21 +262,21 @@ class SaveLoader(QtCore.QObject):
                 return
             
             if index < 0 or index >= len(self.backups):
-                self.server_tell(player, 'Please type a valid index.')
+                self.utils.tell(player, 'Please type a valid index.')
                 return
             self.restore_to = index
 
         if self.configs['permission-level'] == 'op':
             if not player.is_op():
-                self.server_tell(player, 'Only op can make a backup. Permission denied.')
+                self.utils.tell(player, 'Only op can make a backup. Permission denied.')
                 return
         
         if self.count_down == -1:
             self.need_confirm = True
             valid_time = self.configs['restore-valid-sec']
-            self.server_say('Player {} requested for restoring the server to: {}'.format(player.name, self.backups[self.restore_to]['time']))
-            self.server_tell(player, 'Please type "!sl confirm" to CONFIRM your operation or type "!sl cancel" to cancel.')
-            self.server_tell(player, 'If not confirmed, the restoration will be cancelled automatically after {} seconds.'.format(valid_time))
+            self.utils.say('Player {} requested for restoring the server to: {}'.format(player.name, self.backups[self.restore_to]['time']))
+            self.utils.tell(player, 'Please type "!sl confirm" to CONFIRM your operation or type "!sl cancel" to cancel.')
+            self.utils.tell(player, 'If not confirmed, the restoration will be cancelled automatically after {} seconds.'.format(valid_time))
             self.valid_timer.start(valid_time * 1000)
 
     def show_list(self, player, text_list):
@@ -247,15 +285,15 @@ class SaveLoader(QtCore.QObject):
             self.unknown_command(player)
             return
 
-        self.server_tell(player, 'Backups:')
+        self.utils.tell(player, 'Backups:')
         for i in range(len(self.backups)):
             backup_info = self.backups[i]
             remark = 'None' if backup_info['remark'] == '' else backup_info['remark']
             info_str = '{:d}: made by {} at {}, remark: {}'.format(i, backup_info['player'], backup_info['time'], remark)
-            self.server_tell(player, info_str)
+            self.utils.tell(player, info_str)
         
         if len(self.backups) == 0:
-            self.server_tell(player, 'There is no existing backup.')
+            self.utils.tell(player, 'There is no existing backup.')
         
     def confirm(self, player, text_list):
         self.logger.debug('SaveLoader.confirm called')
@@ -265,7 +303,7 @@ class SaveLoader(QtCore.QObject):
 
         if self.configs['permission-level'] == 'op':
             if not player.is_op():
-                self.server_tell(player, 'Only op can make a backup. Permission denied.')
+                self.utils.tell(player, 'Only op can confirm the restoration. Permission denied.')
                 return
 
         if self.need_confirm:
@@ -273,9 +311,9 @@ class SaveLoader(QtCore.QObject):
             if self.count_down == -1:
                 self.count_down = self.configs['restore-count-down-sec'] + 1
                 self.count_down_timer.start(1000)
-                self.server_tell(player, 'You have confirmed the restoration. Count down will start immediately.')
+                self.utils.tell(player, 'You have confirmed the restoration. Count down will start immediately.')
         else:
-            self.server_tell(player, 'Nothing to confirm.')
+            self.utils.tell(player, 'Nothing to confirm.')
 
     def cancel(self, player, text_list):
         self.logger.debug('SaveLoader.cancel called')
@@ -286,7 +324,7 @@ class SaveLoader(QtCore.QObject):
         self.count_down = -1
         self.restore_to = None
         if self.need_confirm:
-            self.server_say('The restoration has been cancelled by {}'.format(player.name))
+            self.utils.say('The restoration has been cancelled by {}'.format(player.name))
         self.need_confirm = False
 
     def auto_backup(self):
@@ -305,7 +343,7 @@ class SaveLoader(QtCore.QObject):
         self.core.write_server('/save-all flush')
         
         start_time = time.time()
-        file_name, file_size = zip.zip_dir('./', file_name)
+        file_name, file_size = zipper.zip_dir('./', file_name)
         end_time = time.time()
 
         self.core.write_server('/save-on')
@@ -322,9 +360,9 @@ class SaveLoader(QtCore.QObject):
         )
 
         info_str = 'Auto-backup was successfully made at {}'.format(time_str)
-        self.server_say(info_str)
+        self.utils.say(info_str)
         info_str = 'Backup size: {}. Cost: {:.1f} seconds.'.format(zip_size, end_time - start_time)
-        self.server_say(info_str)
+        self.utils.say(info_str)
 
         if len(self.backups) > self.configs['max-backup-num']:  # max-backup-num exceeded, delete the oldest backup
             os.remove(self.backups[0]['file_name'])
@@ -348,7 +386,7 @@ class SaveLoader(QtCore.QObject):
             self.core.stop_server()
             self.restoring = True
             return
-        self.server_say('The server will be restored after {:d} seconds!'.format(self.count_down))
+        self.utils.say('The server will be restored after {:d} seconds!'.format(self.count_down))
 
     def confirm_timeout(self):
         self.logger.debug('SaveLoader.confirm_timeout called')
@@ -356,6 +394,7 @@ class SaveLoader(QtCore.QObject):
         self.need_confirm = False
         self.valid_timer.stop()
 
+    @QtCore.pyqtSlot()
     def maybe_restore_server(self):
         if not self.restoring:
             return
@@ -363,7 +402,7 @@ class SaveLoader(QtCore.QObject):
         self.logger.debug('Restoring the server...')
         backup_file = self.backups[self.restore_to]['file_name']
         self.logger.debug('Unzipping {}'.format(backup_file))
-        zip.unzip(backup_file, './')
+        zipper.unzip(backup_file, './')
         self.logger.debug('Unzipping finished')
 
         # Reset these marks
